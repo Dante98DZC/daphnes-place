@@ -1,0 +1,1052 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Daphne's Place</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,700;1,400;1,500&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+  'use strict';
+  const { useState, useEffect, useRef, useMemo, useCallback } = React;
+  const h = React.createElement;
+
+  // ─────────────────────────────────────────────────────────────────
+  // CONFIG
+  // ─────────────────────────────────────────────────────────────────
+  const SUPABASE_URL = "https://zrzsvuiqeasupboyhnmh.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpyenN2dWlxZWFzdXBib3lobm1oIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0NTg4MjksImV4cCI6MjA5MDAzNDgyOX0.7XnSMEh6OTlXbqMeh5kfbI77Rm35pWz1XD4t6GvP_PE";
+  const WA_DEFAULT = "1234567890";
+
+  const DEFAULTS = {
+    hero: {
+      tag: "Skincare · Belleza · Bienestar",
+      title: "Tu rutina de cuidado, redefinida",
+      titleItalic: "redefinida",
+      subtitle: "Descubre productos cuidadosamente seleccionados para realzar tu belleza natural.",
+      image_url: "",
+      floats: [
+        { text: "Envío a domicilio" },
+        { text: "Productos seleccionados" },
+        { text: "Asesoría personalizada" },
+      ],
+    },
+  };
+
+  const SORT_OPTIONS = [
+    { value: "position", label: "Destacados" },
+    { value: "price_asc",  label: "Precio: menor a mayor" },
+    { value: "price_desc", label: "Precio: mayor a menor" },
+    { value: "name_asc",   label: "Nombre A-Z" },
+    { value: "name_desc",  label: "Nombre Z-A" },
+  ];
+
+  // ─────────────────────────────────────────────────────────────────
+  // AUTH
+  // ─────────────────────────────────────────────────────────────────
+  let _token = null;
+  const setToken = t => { _token = t; };
+  const getToken = () => _token;
+
+  // ─────────────────────────────────────────────────────────────────
+  // SUPABASE HELPERS
+  // ─────────────────────────────────────────────────────────────────
+  async function sbReq(method, path, body = null) {
+    const url = `${SUPABASE_URL}/rest/v1/${path}`;
+    const token = getToken() || SUPABASE_ANON_KEY;
+    const headers = {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${token}`,
+      Prefer: "return=representation",
+    };
+    const cfg = { method, headers };
+    if (body) cfg.body = JSON.stringify(body);
+    const res = await fetch(url, cfg);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Supabase ${res.status}: ${text}`);
+    try { return text ? JSON.parse(text) : null; } catch { return text; }
+  }
+
+  async function sbUpload(file) {
+    const ext = file.name.split(".").pop() || "jpg";
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    const token = getToken() || SUPABASE_ANON_KEY;
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/product-images/${name}`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": file.type || "application/octet-stream",
+        "x-upsert": "true",
+      },
+      body: file,
+    });
+    if (!res.ok) { const e = await res.text(); throw new Error(`Storage ${res.status}: ${e}`); }
+    return `${SUPABASE_URL}/storage/v1/object/public/product-images/${name}`;
+  }
+
+  async function loadAll() {
+    const [products, categories, config] = await Promise.all([
+      sbReq("GET", "products?order=position.asc,id.asc"),
+      sbReq("GET", "categories?order=name.asc"),
+      sbReq("GET", "site_config"),
+    ]);
+
+    let whatsapp = WA_DEFAULT, hero = DEFAULTS.hero;
+    if (Array.isArray(config)) {
+      config.forEach(c => {
+        if (c.key === "whatsapp_number") whatsapp = c.value;
+        if (c.key === "hero" && c.value) hero = { ...DEFAULTS.hero, ...c.value };
+      });
+    }
+
+    return {
+      products: (products || []).map(p => ({ ...p, description: p.description || "" })),
+      categories: categories || [],
+      whatsapp,
+      hero,
+    };
+  }
+
+  async function saveItem(table, item, action = "save") {
+    if (action === "delete") return sbReq("DELETE", `${table}?id=eq.${item.id}`);
+    const { id, ...rest } = item;
+    const body = table === "products" ? sanitizeProduct(rest) : rest;
+    if (id) return sbReq("PATCH", `${table}?id=eq.${id}`, body);
+    const r = await sbReq("POST", table, body);
+    return r?.[0] || r;
+  }
+
+  async function saveConfig(key, value) {
+    try { await sbReq("PATCH", `site_config?key=eq.${key}`, { value }); }
+    catch { await sbReq("POST", "site_config", { key, value }); }
+  }
+
+  function sanitizeProduct(p) {
+    return {
+      name: p.name,
+      category: p.category || "",
+      price: p.price,
+      description: p.description || "",
+      image_url: p.image_url || "",
+      featured: !!p.featured,
+      soldOut: !!p.soldOut,
+      ...(p.position !== undefined && { position: p.position }),
+    };
+  }
+
+  function buildWaUrl(number, text) {
+    const n = (number || WA_DEFAULT).replace(/[^0-9]+/g, "");
+    return text ? `https://wa.me/${n}?text=${encodeURIComponent(text)}` : `https://wa.me/${n}`;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // COMMON COMPONENTS
+  // ─────────────────────────────────────────────────────────────────
+  function Spinner() {
+    return h("div", { className: "spinner-wrap" },
+      h("div", { className: "spinner" }),
+      h("span", { style: { fontSize: "13px", color: "var(--muted)" } }, "Cargando...")
+    );
+  }
+
+  function Toast({ msg, onDone }) {
+    useEffect(() => { const t = setTimeout(onDone, 2600); return () => clearTimeout(t); }, []);
+    return h("div", { className: "toast" }, msg);
+  }
+
+  function ImageUploader({ value, onChange }) {
+    const [uploading, setUploading] = useState(false);
+    const [error, setError] = useState("");
+    const ref = useRef(null);
+    const handle = async e => {
+      const file = e.target.files?.[0]; if (!file) return;
+      setUploading(true); setError("");
+      try { onChange(await sbUpload(file)); }
+      catch (err) { setError(err.message || "Error al subir"); }
+      finally { setUploading(false); if (ref.current) ref.current.value = ""; }
+    };
+    return h("div", { className: "img-uploader" },
+      h("div", { className: "img-uploader-row" },
+        h("label", { className: `img-upload-btn${uploading ? " uploading" : ""}` },
+          "📷 ", uploading ? "Subiendo..." : "Subir imagen",
+          h("input", { ref, type: "file", accept: "image/*", style: { display: "none" }, disabled: uploading, onChange: handle })
+        ),
+        value && h("img", { src: value, alt: "preview", className: "img-preview", onError: e => e.target.style.display = "none" })
+      ),
+      error && h("div", { className: "img-uploader-error" }, error),
+      h("input", {
+        className: "form-input", value: value || "",
+        onChange: e => onChange(e.target.value),
+        placeholder: "O pega una URL de imagen..."
+      })
+    );
+  }
+
+  // SVG icons inline (no external deps)
+  function SearchIcon() {
+    return h("svg", { xmlns: "http://www.w3.org/2000/svg", fill: "none", viewBox: "0 0 24 24", stroke: "currentColor", strokeWidth: 2 },
+      h("circle", { cx: 11, cy: 11, r: 8 }),
+      h("path", { strokeLinecap: "round", d: "m21 21-4.35-4.35" })
+    );
+  }
+  function WhatsappIcon({ size = 20 }) {
+    return h("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "currentColor" },
+      h("path", { d: "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z" }),
+      h("path", { d: "M12 0C5.373 0 0 5.373 0 12c0 2.123.554 4.12 1.522 5.852L.057 23.428a.75.75 0 0 0 .915.915l5.598-1.457A11.944 11.944 0 0 0 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.9 0-3.68-.505-5.214-1.387l-.375-.217-3.871 1.007 1.023-3.77-.229-.387A9.946 9.946 0 0 1 2 12C2 6.486 6.486 2 12 2s10 4.486 10 10-4.486 10-10 10z" })
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PRODUCT CARD
+  // ─────────────────────────────────────────────────────────────────
+  function ProductCard({ p, onClick, whatsapp }) {
+    const waUrl = buildWaUrl(whatsapp, `¡Hola! Me interesa el producto: *${p.name}* ($${p.price})`);
+    return h("div", {
+      className: `product-card${p.soldOut ? " sold-out" : ""}`,
+      onClick: () => onClick(p)
+    },
+      h("div", { className: "product-img-wrap" },
+        p.image_url
+          ? h("img", { src: p.image_url, alt: p.name, className: "product-img", onError: e => { e.target.style.display = "none"; } })
+          : h("div", { className: "product-img-placeholder" }, h("span", { style: { fontSize: "3rem" } }, "🌿")),
+        h("div", { className: "product-overlay" },
+          h("span", { className: "product-overlay-text" }, "Ver detalles")
+        ),
+        h("div", { className: "product-badge-wrap" },
+          p.featured && h("span", { className: "product-badge badge-featured" }, "★ Favorito"),
+          p.soldOut && h("span", { className: "product-badge badge-soldout" }, "Agotado"),
+        )
+      ),
+      h("div", { className: "product-info" },
+        h("span", { className: "product-cat-tag" }, p.category),
+        h("div", { className: "product-name" }, p.name),
+        p.description && h("div", { className: "product-desc" }, p.description),
+        h("div", { className: "product-footer" },
+          h("span", { className: "product-price" }, `$${p.price}`),
+          h("button", {
+            className: "product-order-btn",
+            disabled: p.soldOut,
+            onClick: e => { e.stopPropagation(); if (!p.soldOut) window.open(waUrl, "_blank"); }
+          }, p.soldOut ? "Agotado" : "Pedir")
+        )
+      )
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PRODUCT MODAL
+  // ─────────────────────────────────────────────────────────────────
+  function ProductModal({ p, onClose, whatsapp }) {
+    const waUrl = buildWaUrl(whatsapp, `¡Hola! Me interesa el producto: *${p.name}* ($${p.price})\n\n¿Está disponible?`);
+    useEffect(() => {
+      const handler = e => { if (e.key === "Escape") onClose(); };
+      document.addEventListener("keydown", handler);
+      return () => document.removeEventListener("keydown", handler);
+    }, []);
+    return h("div", { className: "modal-overlay", onClick: e => { if (e.target.className === "modal-overlay") onClose(); } },
+      h("div", { className: "modal" },
+        p.image_url
+          ? h("img", { src: p.image_url, alt: p.name, className: "modal-img", onError: e => { e.target.style.display = "none"; } })
+          : h("div", { className: "modal-img-placeholder" }, "🌿"),
+        h("div", { className: "modal-body" },
+          h("div", { className: "modal-header" },
+            h("div", null,
+              h("div", { className: "modal-cat" }, p.category),
+              h("div", { className: "modal-title" }, p.name)
+            ),
+            h("button", { className: "modal-close", onClick: onClose }, "×")
+          ),
+          p.description && h("p", { className: "modal-desc" }, p.description),
+          h("div", { className: "modal-footer" },
+            h("span", { className: "modal-price" }, `$${p.price}`),
+            p.soldOut
+              ? h("span", { style: { color: "var(--muted)", fontSize: "14px" } }, "Producto agotado")
+              : h("button", {
+                  className: "modal-order-btn",
+                  onClick: () => window.open(waUrl, "_blank")
+                },
+                h(WhatsappIcon, { size: 18 }), " Pedir por WhatsApp"
+              )
+          )
+        )
+      )
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // PUBLIC SITE
+  // ─────────────────────────────────────────────────────────────────
+  function PublicSite({ products, categories, whatsapp, hero, setPage }) {
+    const [cat, setCat] = useState("Todos");
+    const [search, setSearch] = useState("");
+    const [sort, setSort] = useState("position");
+    const [showFeatured, setShowFeatured] = useState(false);
+    const [modal, setModal] = useState(null);
+
+    const filtered = useMemo(() => {
+      let list = [...products];
+      // Category filter
+      if (cat !== "Todos") list = list.filter(p => p.category === cat);
+      // Search
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        list = list.filter(p =>
+          p.name?.toLowerCase().includes(q) ||
+          p.description?.toLowerCase().includes(q) ||
+          p.category?.toLowerCase().includes(q)
+        );
+      }
+      // Featured filter
+      if (showFeatured) list = list.filter(p => p.featured);
+      // Sort
+      switch (sort) {
+        case "price_asc":  list.sort((a, b) => +a.price - +b.price); break;
+        case "price_desc": list.sort((a, b) => +b.price - +a.price); break;
+        case "name_asc":   list.sort((a, b) => (a.name||"").localeCompare(b.name||"")); break;
+        case "name_desc":  list.sort((a, b) => (b.name||"").localeCompare(a.name||"")); break;
+        default: /* position already ordered */ break;
+      }
+      return list;
+    }, [products, cat, search, sort, showFeatured]);
+
+    const featured = products.filter(p => p.featured && !p.soldOut).slice(0, 4);
+
+    const heroFloats = hero?.floats || DEFAULTS.hero.floats;
+
+    return h("div", null,
+      // ── NAV
+      h("nav", null,
+        h("div", { className: "nav-inner" },
+          h("div", { className: "nav-logo" },
+            "Daphne's ", h("span", null, "Place")
+          ),
+          h("div", { className: "nav-links" },
+            h("button", { className: "nav-btn",
+              onClick: () => document.getElementById("productos")?.scrollIntoView({ behavior: "smooth" })
+            }, "Productos"),
+            h("button", { className: "nav-btn",
+              onClick: () => document.getElementById("contacto")?.scrollIntoView({ behavior: "smooth" })
+            }, "Contacto"),
+            h("button", { className: "nav-btn", onClick: () => setPage("login") }, "Admin"),
+          )
+        )
+      ),
+
+      // ── HERO
+      h("div", { className: "hero" },
+        h("div", { className: "hero-text" },
+          h("div", { className: "hero-tag" }, hero?.tag || DEFAULTS.hero.tag),
+          h("h1", null, hero?.title || DEFAULTS.hero.title),
+          h("p", null, hero?.subtitle || DEFAULTS.hero.subtitle),
+          h("div", { className: "hero-actions" },
+            h("button", { className: "btn-primary",
+              onClick: () => document.getElementById("productos")?.scrollIntoView({ behavior: "smooth" })
+            }, "Ver productos →"),
+            h("button", { className: "btn-outline",
+              onClick: () => window.open(buildWaUrl(whatsapp), "_blank")
+            }, "Contactar")
+          ),
+          h("div", { className: "hero-floats" },
+            heroFloats.map((f, i) =>
+              h("div", { key: i, className: "hero-float" },
+                h("div", { className: "hero-float-dot" }),
+                f.text
+              )
+            )
+          )
+        ),
+        h("div", { className: "hero-visual" },
+          h("div", { className: "hero-img-wrap" },
+            hero?.image_url
+              ? h("img", { src: hero.image_url, alt: "Hero", onError: e => { e.target.style.display = "none"; } })
+              : h("div", { className: "hero-img-placeholder" },
+                  h("svg", { viewBox: "0 0 100 100", fill: "none", xmlns: "http://www.w3.org/2000/svg" },
+                    h("circle", { cx: 50, cy: 35, r: 20, stroke: "#DFADB0", strokeWidth: 2 }),
+                    h("path", { d: "M20 80 Q50 55 80 80", stroke: "#DFADB0", strokeWidth: 2, fill: "none" }),
+                    h("path", { d: "M35 70 Q50 60 65 70", stroke: "#C4737A", strokeWidth: 1.5, fill: "none" }),
+                    h("circle", { cx: 30, cy: 60, r: 8, stroke: "#DFADB0", strokeWidth: 1.5, fill: "none" }),
+                    h("circle", { cx: 70, cy: 60, r: 8, stroke: "#DFADB0", strokeWidth: 1.5, fill: "none" }),
+                  ),
+                  h("span", null, "Daphne's Place")
+                )
+          ),
+          products.length > 0 && h("div", { className: "hero-badge" },
+            h("div", { className: "hero-badge-icon" }, "🌸"),
+            h("div", { className: "hero-badge-text" },
+              h("strong", null, `${products.length}+ Productos`),
+              "disponibles ahora"
+            )
+          )
+        )
+      ),
+
+      // ── FEATURED
+      featured.length > 0 && h("div", { className: "featured-strip" },
+        h("div", { className: "featured-strip-inner" },
+          h("div", { className: "section-header" },
+            h("div", null,
+              h("div", { className: "section-label" }, "Selección especial"),
+              h("div", { className: "section-title" }, "Favoritos de Daphne")
+            )
+          ),
+          h("div", { className: "products-grid" },
+            featured.map(p =>
+              h(ProductCard, { key: p.id, p, onClick: setModal, whatsapp })
+            )
+          )
+        )
+      ),
+
+      // ── ALL PRODUCTS
+      h("div", { id: "productos", className: "section" },
+        h("div", { className: "section-header" },
+          h("div", null,
+            h("div", { className: "section-label" }, "Catálogo completo"),
+            h("div", { className: "section-title" }, "Todos los productos")
+          )
+        ),
+
+        // Category pills
+        categories.length > 0 && h("div", { className: "cats-grid" },
+          h("div", {
+            className: `cat-card${cat === "Todos" ? " active" : ""}`,
+            onClick: () => setCat("Todos")
+          },
+            h("div", { className: "cat-card-emoji" }, "✦"),
+            h("div", { className: "cat-card-name" }, "Todos")
+          ),
+          categories.map(c =>
+            h("div", {
+              key: c.id,
+              className: `cat-card${cat === c.name ? " active" : ""}`,
+              onClick: () => setCat(c.name)
+            },
+              h("div", { className: "cat-card-emoji" }, c.emoji || "🌿"),
+              h("div", { className: "cat-card-name" }, c.name)
+            )
+          )
+        ),
+
+        // Filters bar
+        h("div", { className: "filters-bar" },
+          h("div", { className: "filter-search-wrap" },
+            h(SearchIcon),
+            h("input", {
+              className: "filter-search",
+              placeholder: "Buscar productos...",
+              value: search,
+              onChange: e => setSearch(e.target.value)
+            })
+          ),
+          h("div", { className: "filter-divider" }),
+          h("select", {
+            className: "filter-select",
+            value: sort,
+            onChange: e => setSort(e.target.value)
+          },
+            SORT_OPTIONS.map(o => h("option", { key: o.value, value: o.value }, o.label))
+          ),
+          h("div", { className: "filter-divider" }),
+          h("div", { className: "filter-toggle-group" },
+            h("button", {
+              className: `filter-chip${showFeatured ? " active" : ""}`,
+              onClick: () => setShowFeatured(v => !v)
+            }, "★ Favoritos"),
+          ),
+          h("span", { className: "filter-results" }, `${filtered.length} resultado${filtered.length !== 1 ? "s" : ""}`)
+        ),
+
+        filtered.length === 0
+          ? h("div", { className: "empty" },
+              h("div", { className: "empty-icon" }, "🌿"),
+              h("div", { className: "empty-text" }, "Sin productos que coincidan con tu búsqueda")
+            )
+          : h("div", { className: "products-grid" },
+              filtered.map(p =>
+                h(ProductCard, { key: p.id, p, onClick: setModal, whatsapp })
+              )
+            )
+      ),
+
+      // ── CONTACT
+      h("div", { id: "contacto", className: "contact-strip" },
+        h("h2", null, "¿Lista para tu rutina?"),
+        h("p", null, "Escríbenos y te asesoramos sobre los mejores productos para ti."),
+        h("button", {
+          className: "contact-btn",
+          onClick: () => window.open(buildWaUrl(whatsapp, "¡Hola! Me gustaría recibir asesoría sobre sus productos de skincare 🌸"), "_blank")
+        },
+          h(WhatsappIcon, { size: 20 }), " Escríbenos por WhatsApp"
+        )
+      ),
+
+      h("footer", null,
+        h("strong", null, "Daphne's Place"),
+        " · Skincare & Belleza · © 2026"
+      ),
+
+      modal && h(ProductModal, { p: modal, onClose: () => setModal(null), whatsapp })
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // LOGIN
+  // ─────────────────────────────────────────────────────────────────
+  function Login({ setPage }) {
+    const [email, setEmail] = useState("");
+    const [pass, setPass] = useState("");
+    const [err, setErr] = useState("");
+    const [loading, setLoading] = useState(false);
+
+    const submit = async () => {
+      if (!email.trim() || !pass.trim()) { setErr("Ingresa tu email y contraseña"); return; }
+      setLoading(true); setErr("");
+      try {
+        const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+          body: JSON.stringify({ email, password: pass }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.access_token) {
+          setErr(data.error_description || data.msg || "Credenciales incorrectas");
+          return;
+        }
+        setToken(data.access_token);
+        setPage("admin");
+      } catch { setErr("Error de conexión. Intenta de nuevo."); }
+      finally { setLoading(false); }
+    };
+
+    return h("div", { className: "login-wrap" },
+      h("div", { className: "login-card" },
+        h("div", { className: "login-logo" }, "Daphne's ", h("span", null, "Place")),
+        h("div", { className: "login-sub" }, "Panel de administración"),
+        err && h("div", { className: "login-error" }, err),
+        h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+          h("label", { className: "form-label" }, "Email"),
+          h("input", {
+            className: "form-input", type: "email", value: email,
+            onChange: e => setEmail(e.target.value),
+            placeholder: "tu@email.com"
+          })
+        ),
+        h("div", { className: "form-group", style: { marginBottom: "1.5rem" } },
+          h("label", { className: "form-label" }, "Contraseña"),
+          h("input", {
+            className: "form-input", type: "password", value: pass,
+            onChange: e => setPass(e.target.value),
+            onKeyDown: e => e.key === "Enter" && submit(),
+            placeholder: "••••••••"
+          })
+        ),
+        h("button", {
+          className: "btn-save", style: { width: "100%" },
+          disabled: loading, onClick: submit
+        }, loading ? "Entrando..." : "Entrar al panel"),
+        h("div", { style: { textAlign: "center", marginTop: "1rem" } },
+          h("button", { className: "btn-cancel", onClick: () => setPage("home") }, "← Volver al sitio")
+        )
+      )
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // ADMIN – PRODUCT FORM
+  // ─────────────────────────────────────────────────────────────────
+  function ProductForm({ item, onSave, onCancel, saving, categories }) {
+    const blank = { name: "", category: categories[0]?.name || "", price: "", description: "", featured: false, image_url: "", soldOut: false };
+    const [f, setF] = useState(item ? { ...blank, ...item } : blank);
+    const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+    return h("div", null,
+      h("div", { className: "form-row" },
+        h("div", { className: "form-group" },
+          h("label", { className: "form-label" }, "Nombre ", h("span", null, "*")),
+          h("input", { className: "form-input", value: f.name, onChange: e => set("name", e.target.value), placeholder: "Ej. Sérum Vitamina C" })
+        ),
+        h("div", { className: "form-group" },
+          h("label", { className: "form-label" }, "Precio ", h("span", null, "*")),
+          h("input", { className: "form-input", type: "number", min: "0", step: "0.01", value: f.price, onChange: e => set("price", e.target.value), placeholder: "0.00" })
+        )
+      ),
+      h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+        h("label", { className: "form-label" }, "Categoría"),
+        h("select", { className: "form-select", value: f.category, onChange: e => set("category", e.target.value) },
+          h("option", { value: "" }, "Sin categoría"),
+          categories.map(c => h("option", { key: c.id, value: c.name }, c.name))
+        )
+      ),
+      h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+        h("label", { className: "form-label" }, "Imagen del producto"),
+        h(ImageUploader, { value: f.image_url || "", onChange: url => set("image_url", url) })
+      ),
+      h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+        h("label", { className: "form-label" }, "Descripción"),
+        h("textarea", { className: "form-textarea", value: f.description || "", onChange: e => set("description", e.target.value), placeholder: "Describe los beneficios y modo de uso..." })
+      ),
+      h("div", { style: { display: "flex", gap: "1.5rem", flexWrap: "wrap", marginBottom: "1rem" } },
+        h("div", { className: "form-check-row" },
+          h("input", { type: "checkbox", id: `featured-${f.id||'new'}`, checked: f.featured, onChange: e => set("featured", e.target.checked) }),
+          h("label", { htmlFor: `featured-${f.id||'new'}` }, "⭐ Marcar como favorito")
+        ),
+        h("div", { className: "form-check-row" },
+          h("input", { type: "checkbox", id: `sold-${f.id||'new'}`, checked: f.soldOut, onChange: e => set("soldOut", e.target.checked) }),
+          h("label", { htmlFor: `sold-${f.id||'new'}` }, "🚫 Producto agotado")
+        )
+      ),
+      h("div", { className: "form-actions" },
+        h("button", { className: "btn-save", disabled: saving, onClick: () => onSave(f) }, saving ? "Guardando..." : item ? "Guardar cambios" : "Crear producto"),
+        h("button", { className: "btn-cancel", disabled: saving, onClick: onCancel }, "Cancelar")
+      )
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // ADMIN – PANEL
+  // ─────────────────────────────────────────────────────────────────
+  function Admin({ data, setData, setPage }) {
+    const { products = [], categories = [], whatsapp: wha = "", hero: heroInit = {} } = data;
+
+    const [tab, setTab] = useState("products");
+    const [saving, setSaving] = useState(false);
+    const [toast, setToast] = useState("");
+
+    // Products
+    const [editP, setEditP] = useState(null);
+    const [showFormP, setShowFormP] = useState(false);
+    const [pSearch, setPSearch] = useState("");
+    const [pCat, setPCat] = useState("Todos");
+    const [pSoldFilter, setPSoldFilter] = useState("all");
+
+    // Categories
+    const [editC, setEditC] = useState(null);
+    const [showFormC, setShowFormC] = useState(false);
+    const [catName, setCatName] = useState("");
+    const [catEmoji, setCatEmoji] = useState("🌿");
+
+    // Config
+    const [whatsapp, setWhatsapp] = useState(wha);
+    const [heroData, setHeroData] = useState({ ...DEFAULTS.hero, ...heroInit });
+
+    const showToast = msg => { setToast(msg); setTimeout(() => setToast(""), 2600); };
+    const withSaving = async fn => {
+      setSaving(true);
+      try { await fn(); }
+      catch (e) { showToast("❌ " + (e?.message || "Error al guardar")); }
+      finally { setSaving(false); }
+    };
+
+    // ── Product actions
+    const saveProduct = async f => {
+      if (!f.name?.trim()) { showToast("⚠ El nombre es requerido"); return; }
+      if (!f.price && f.price !== 0) { showToast("⚠ El precio es requerido"); return; }
+      await withSaving(async () => {
+        const saved = await saveItem("products", f);
+        setData(d => {
+          const prods = f.id
+            ? d.products.map(p => p.id === f.id ? { ...f, ...saved } : p)
+            : [...d.products, { ...f, ...saved }];
+          return { ...d, products: prods };
+        });
+        setShowFormP(false); setEditP(null);
+        showToast(f.id ? "✓ Producto actualizado" : "✓ Producto creado");
+      });
+    };
+
+    const delProduct = async id => {
+      if (!confirm("¿Eliminar este producto?")) return;
+      await withSaving(async () => {
+        await saveItem("products", { id }, "delete");
+        setData(d => ({ ...d, products: d.products.filter(p => p.id !== id) }));
+        showToast("✓ Producto eliminado");
+      });
+    };
+
+    const toggleSoldOut = async p => {
+      await withSaving(async () => {
+        await saveItem("products", { ...p, soldOut: !p.soldOut });
+        setData(d => ({
+          ...d,
+          products: d.products.map(x => x.id === p.id ? { ...x, soldOut: !x.soldOut } : x)
+        }));
+        showToast(!p.soldOut ? "✓ Marcado como agotado" : "✓ Marcado como disponible");
+      });
+    };
+
+    // ── Category actions
+    const saveCategory = async () => {
+      if (!catName.trim()) { showToast("⚠ El nombre es requerido"); return; }
+      await withSaving(async () => {
+        const item = editC ? { ...editC, name: catName.trim(), emoji: catEmoji } : { name: catName.trim(), emoji: catEmoji };
+        const saved = await saveItem("categories", item);
+        setData(d => ({
+          ...d,
+          categories: editC
+            ? d.categories.map(c => c.id === editC.id ? { ...c, ...saved } : c)
+            : [...d.categories, { ...item, ...saved }]
+        }));
+        setShowFormC(false); setEditC(null); setCatName(""); setCatEmoji("🌿");
+        showToast(editC ? "✓ Categoría actualizada" : "✓ Categoría creada");
+      });
+    };
+
+    const delCategory = async id => {
+      if (!confirm("¿Eliminar esta categoría?")) return;
+      await withSaving(async () => {
+        await saveItem("categories", { id }, "delete");
+        setData(d => ({ ...d, categories: d.categories.filter(c => c.id !== id) }));
+        showToast("✓ Categoría eliminada");
+      });
+    };
+
+    // ── Config actions
+    const saveWhatsapp = () => withSaving(async () => {
+      await saveConfig("whatsapp_number", whatsapp.trim());
+      setData(d => ({ ...d, whatsapp: whatsapp.trim() }));
+      showToast("✓ WhatsApp guardado");
+    });
+
+    const saveHero = () => withSaving(async () => {
+      await saveConfig("hero", heroData);
+      setData(d => ({ ...d, hero: heroData }));
+      showToast("✓ Hero actualizado");
+    });
+
+    // ── Filtered products (admin)
+    const filteredP = useMemo(() => {
+      let list = [...products];
+      if (pCat !== "Todos") list = list.filter(p => p.category === pCat);
+      if (pSearch.trim()) {
+        const q = pSearch.toLowerCase();
+        list = list.filter(p => p.name?.toLowerCase().includes(q) || p.category?.toLowerCase().includes(q));
+      }
+      if (pSoldFilter === "available") list = list.filter(p => !p.soldOut);
+      if (pSoldFilter === "soldout") list = list.filter(p => p.soldOut);
+      return list;
+    }, [products, pCat, pSearch, pSoldFilter]);
+
+    const stats = {
+      total: products.length,
+      featured: products.filter(p => p.featured).length,
+      soldOut: products.filter(p => p.soldOut).length,
+      cats: categories.length,
+    };
+
+    return h("div", { className: "admin-wrap" },
+      // Admin nav
+      h("div", { className: "admin-nav" },
+        h("div", { className: "admin-logo" },
+          "Daphne's ", h("span", null, "Place"),
+          h("em", null, "Admin")
+        ),
+        h("div", { className: "admin-nav-right" },
+          h("button", { className: "admin-nav-btn", onClick: () => setPage("home") }, "← Ver sitio"),
+        )
+      ),
+
+      h("div", { className: "admin-body" },
+
+        // Stats row
+        h("div", { className: "stats-row" },
+          h("div", { className: "stat-card" },
+            h("div", { className: "stat-label" }, "Productos"),
+            h("div", { className: "stat-value" }, stats.total),
+            h("div", { className: "stat-sub" }, "en catálogo")
+          ),
+          h("div", { className: "stat-card" },
+            h("div", { className: "stat-label" }, "Favoritos"),
+            h("div", { className: "stat-value" }, stats.featured),
+            h("div", { className: "stat-sub" }, "destacados")
+          ),
+          h("div", { className: "stat-card" },
+            h("div", { className: "stat-label" }, "Agotados"),
+            h("div", { className: "stat-value" }, stats.soldOut),
+            h("div", { className: "stat-sub" }, "sin stock")
+          ),
+          h("div", { className: "stat-card" },
+            h("div", { className: "stat-label" }, "Categorías"),
+            h("div", { className: "stat-value" }, stats.cats),
+            h("div", { className: "stat-sub" }, "tipos de producto")
+          ),
+        ),
+
+        // Tabs
+        h("div", { className: "admin-tabs" },
+          ["products", "categories", "config"].map(t =>
+            h("button", {
+              key: t, className: `admin-tab${tab === t ? " active" : ""}`,
+              onClick: () => setTab(t)
+            }, { products: "📦 Productos", categories: "🏷 Categorías", config: "⚙ Configuración" }[t])
+          )
+        ),
+
+        // ── PRODUCTS TAB
+        tab === "products" && h("div", null,
+          h("div", { className: "admin-section-header" },
+            h("div", { className: "admin-section-title" }, "Gestión de Productos"),
+            !showFormP && h("button", { className: "btn-save", onClick: () => { setEditP(null); setShowFormP(true); } }, "+ Nuevo producto")
+          ),
+
+          // Form
+          (showFormP || editP) && h("div", { className: "admin-form-card" },
+            h("div", { className: "admin-form-title" }, editP ? "✏ Editar producto" : "✦ Nuevo producto"),
+            h(ProductForm, {
+              item: editP, onSave: saveProduct, onCancel: () => { setShowFormP(false); setEditP(null); },
+              saving, categories
+            })
+          ),
+
+          // Filters
+          h("div", { className: "admin-filters" },
+            h("div", { className: "admin-search-wrap" },
+              h(SearchIcon),
+              h("input", {
+                className: "admin-search", placeholder: "Buscar producto...",
+                value: pSearch, onChange: e => setPSearch(e.target.value)
+              })
+            ),
+            h("select", { className: "form-select", style: { minWidth: "140px" }, value: pCat, onChange: e => setPCat(e.target.value) },
+              h("option", { value: "Todos" }, "Todas las categorías"),
+              categories.map(c => h("option", { key: c.id, value: c.name }, c.name))
+            ),
+            h("select", { className: "form-select", value: pSoldFilter, onChange: e => setPSoldFilter(e.target.value) },
+              h("option", { value: "all" }, "Todos los estados"),
+              h("option", { value: "available" }, "Disponibles"),
+              h("option", { value: "soldout" }, "Agotados")
+            ),
+            h("span", { style: { fontSize: "12.5px", color: "var(--muted)", whiteSpace: "nowrap" } },
+              `${filteredP.length} / ${products.length} productos`
+            )
+          ),
+
+          // Product list
+          filteredP.length === 0
+            ? h("div", { className: "empty" },
+                h("div", { className: "empty-icon" }, "🌿"),
+                h("div", { className: "empty-text" }, products.length === 0 ? "Aún no hay productos. Crea el primero." : "Sin resultados para esta búsqueda.")
+              )
+            : h("div", { className: "admin-list" },
+                filteredP.map(p =>
+                  h("div", { key: p.id, className: "admin-item" },
+                    h("div", { className: "admin-item-img" },
+                      p.image_url
+                        ? h("img", { src: p.image_url, alt: p.name, onError: e => { e.target.style.display = "none"; } })
+                        : "🌿"
+                    ),
+                    h("div", { className: "admin-item-info" },
+                      h("div", { className: "admin-item-name" }, p.name),
+                      h("div", { className: "admin-item-badges" },
+                        p.category && h("span", { className: "mini-badge cat" }, p.category),
+                        p.featured && h("span", { className: "mini-badge featured" }, "★ Favorito"),
+                        p.soldOut && h("span", { className: "mini-badge soldout" }, "Agotado"),
+                      )
+                    ),
+                    h("div", { className: "admin-item-price" }, `$${p.price}`),
+                    h("div", { className: "admin-actions" },
+                      h("button", {
+                        className: "btn-icon", title: p.soldOut ? "Marcar disponible" : "Marcar agotado",
+                        disabled: saving, onClick: () => toggleSoldOut(p)
+                      }, p.soldOut ? "✓" : "🚫"),
+                      h("button", {
+                        className: "btn-icon", title: "Editar",
+                        disabled: saving, onClick: () => { setEditP(p); setShowFormP(true); window.scrollTo({ top: 0, behavior: "smooth" }); }
+                      }, "✏"),
+                      h("button", {
+                        className: "btn-icon danger", title: "Eliminar",
+                        disabled: saving, onClick: () => delProduct(p.id)
+                      }, "✕")
+                    )
+                  )
+                )
+              )
+        ),
+
+        // ── CATEGORIES TAB
+        tab === "categories" && h("div", null,
+          h("div", { className: "admin-section-header" },
+            h("div", { className: "admin-section-title" }, "Categorías de Productos"),
+            !showFormC && h("button", { className: "btn-save", onClick: () => { setEditC(null); setCatName(""); setCatEmoji("🌿"); setShowFormC(true); } }, "+ Nueva categoría")
+          ),
+
+          (showFormC || editC) && h("div", { className: "admin-form-card" },
+            h("div", { className: "admin-form-title" }, editC ? "✏ Editar categoría" : "✦ Nueva categoría"),
+            h("div", { className: "form-row" },
+              h("div", { className: "form-group" },
+                h("label", { className: "form-label" }, "Nombre ", h("span", null, "*")),
+                h("input", {
+                  className: "form-input", value: catName,
+                  onChange: e => setCatName(e.target.value),
+                  placeholder: "Ej. Sérum, Crema facial, Protector solar..."
+                })
+              ),
+              h("div", { className: "form-group" },
+                h("label", { className: "form-label" }, "Emoji"),
+                h("input", {
+                  className: "form-input", value: catEmoji,
+                  onChange: e => setCatEmoji(e.target.value),
+                  placeholder: "🌿"
+                })
+              )
+            ),
+            h("div", { className: "form-actions" },
+              h("button", { className: "btn-save", disabled: saving, onClick: saveCategory }, saving ? "Guardando..." : editC ? "Guardar cambios" : "Crear categoría"),
+              h("button", { className: "btn-cancel", onClick: () => { setShowFormC(false); setEditC(null); setCatName(""); setCatEmoji("🌿"); } }, "Cancelar")
+            )
+          ),
+
+          categories.length === 0
+            ? h("div", { className: "empty" },
+                h("div", { className: "empty-icon" }, "🏷"),
+                h("div", { className: "empty-text" }, "Crea categorías para organizar tus productos")
+              )
+            : h("div", { className: "admin-list" },
+                categories.map(c =>
+                  h("div", { key: c.id, className: "admin-item" },
+                    h("div", { className: "admin-item-img" }, c.emoji || "🌿"),
+                    h("div", { className: "admin-item-info" },
+                      h("div", { className: "admin-item-name" }, c.name),
+                      h("div", { className: "admin-item-sub" }, `${products.filter(p => p.category === c.name).length} productos`)
+                    ),
+                    h("div", { className: "admin-actions" },
+                      h("button", {
+                        className: "btn-icon", title: "Editar",
+                        onClick: () => { setEditC(c); setCatName(c.name); setCatEmoji(c.emoji || "🌿"); setShowFormC(true); }
+                      }, "✏"),
+                      h("button", {
+                        className: "btn-icon danger", title: "Eliminar",
+                        onClick: () => delCategory(c.id)
+                      }, "✕")
+                    )
+                  )
+                )
+              )
+        ),
+
+        // ── CONFIG TAB
+        tab === "config" && h("div", null,
+          h("div", { className: "admin-section-title", style: { marginBottom: "1.5rem" } }, "Configuración del sitio"),
+
+          // WhatsApp
+          h("div", { className: "config-card" },
+            h("div", { className: "config-card-title" }, "📱 Número de WhatsApp"),
+            h("div", { className: "form-row" },
+              h("div", { className: "form-group" },
+                h("label", { className: "form-label" }, "Número (con código de país, sin +)"),
+                h("input", {
+                  className: "form-input", value: whatsapp,
+                  onChange: e => setWhatsapp(e.target.value),
+                  placeholder: "573001234567"
+                })
+              )
+            ),
+            h("div", { className: "form-actions" },
+              h("button", { className: "btn-save", disabled: saving, onClick: saveWhatsapp }, "Guardar número")
+            )
+          ),
+
+          // Hero
+          h("div", { className: "config-card" },
+            h("div", { className: "config-card-title" }, "🌸 Sección Hero"),
+            h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+              h("label", { className: "form-label" }, "Etiqueta superior"),
+              h("input", {
+                className: "form-input", value: heroData.tag || "",
+                onChange: e => setHeroData(d => ({ ...d, tag: e.target.value })),
+                placeholder: "Skincare · Belleza · Bienestar"
+              })
+            ),
+            h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+              h("label", { className: "form-label" }, "Título principal"),
+              h("input", {
+                className: "form-input", value: heroData.title || "",
+                onChange: e => setHeroData(d => ({ ...d, title: e.target.value })),
+                placeholder: "Tu rutina de cuidado, redefinida"
+              })
+            ),
+            h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+              h("label", { className: "form-label" }, "Subtítulo"),
+              h("textarea", {
+                className: "form-textarea", value: heroData.subtitle || "",
+                onChange: e => setHeroData(d => ({ ...d, subtitle: e.target.value })),
+                placeholder: "Descripción breve de tu negocio..."
+              })
+            ),
+            h("div", { className: "form-group", style: { marginBottom: "1rem" } },
+              h("label", { className: "form-label" }, "Imagen principal del hero"),
+              h(ImageUploader, { value: heroData.image_url || "", onChange: url => setHeroData(d => ({ ...d, image_url: url })) })
+            ),
+            h("div", { style: { marginBottom: "1rem" } },
+              h("label", { className: "form-label", style: { marginBottom: ".5rem", display: "block" } }, "Puntos destacados (máx. 3)"),
+              (heroData.floats || []).map((f, i) =>
+                h("div", { key: i, style: { display: "flex", gap: ".5rem", marginBottom: ".5rem" } },
+                  h("input", {
+                    className: "form-input",
+                    value: f.text || "",
+                    onChange: e => setHeroData(d => ({
+                      ...d,
+                      floats: d.floats.map((x, j) => j === i ? { ...x, text: e.target.value } : x)
+                    })),
+                    placeholder: `Punto ${i + 1}`
+                  })
+                )
+              )
+            ),
+            h("div", { className: "form-actions" },
+              h("button", { className: "btn-save", disabled: saving, onClick: saveHero }, "Guardar hero")
+            )
+          )
+        )
+      ),
+
+      toast && h(Toast, { msg: toast, onDone: () => setToast("") })
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // ROOT APP
+  // ─────────────────────────────────────────────────────────────────
+  function App() {
+    const [page, setPage] = useState("home");
+    const [data, setData] = useState(null);
+    const [error, setError] = useState("");
+
+    useEffect(() => {
+      loadAll()
+        .then(d => setData({ whatsapp: WA_DEFAULT, products: [], categories: [], hero: DEFAULTS.hero, ...d }))
+        .catch(() => setError("No se pudo conectar con la base de datos. Verifica tu conexión."));
+    }, []);
+
+    if (error) return h("div", {
+      style: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem", flexDirection: "column", gap: "1rem", textAlign: "center" }
+    },
+      h("div", { style: { fontSize: "2.5rem" } }, "⚠️"),
+      h("div", { style: { color: "var(--rose)", fontSize: "14px", maxWidth: "380px" } }, error)
+    );
+
+    if (!data) return h("div", null,
+      h("style", null, "@keyframes spin{to{transform:rotate(360deg)}}"),
+      h(Spinner)
+    );
+
+    if (page === "login") return h(Login, { setPage });
+    if (page === "admin") return h(Admin, { data, setData, setPage });
+    return h(PublicSite, {
+      products: data.products || [],
+      categories: data.categories || [],
+      whatsapp: data.whatsapp || WA_DEFAULT,
+      hero: data.hero || DEFAULTS.hero,
+      setPage,
+    });
+  }
+
+  ReactDOM.createRoot(document.getElementById("app")).render(h(App));
+  </script>
+</body>
+</html>
