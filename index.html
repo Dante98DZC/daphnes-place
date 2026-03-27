@@ -245,15 +245,30 @@
   // ─────────────────────────────────────────────────────────────────
   function ProductModal({ p, onClose, whatsapp }) {
     const waUrl = buildWaUrl(whatsapp, `¡Hola! Me interesa el producto: *${p.name}* ($${p.price})\n\n¿Está disponible?`);
+    const [imgExpanded, setImgExpanded] = useState(false);
     useEffect(() => {
-      const handler = e => { if (e.key === "Escape") onClose(); };
+      const handler = e => { if (e.key === "Escape") { if (imgExpanded) setImgExpanded(false); else onClose(); } };
       document.addEventListener("keydown", handler);
       return () => document.removeEventListener("keydown", handler);
-    }, []);
+    }, [imgExpanded]);
     return h("div", { className: "modal-overlay", onClick: e => { if (e.target.className === "modal-overlay") onClose(); } },
+      // Lightbox overlay (imagen completa)
+      imgExpanded && h("div", {
+        className: "img-lightbox",
+        onClick: () => setImgExpanded(false)
+      },
+        h("button", { className: "lightbox-close", onClick: () => setImgExpanded(false) }, "×"),
+        h("img", {
+          src: p.image_url, alt: p.name, className: "lightbox-img",
+          onClick: e => e.stopPropagation()
+        })
+      ),
       h("div", { className: "modal" },
         p.image_url
-          ? h("img", { src: p.image_url, alt: p.name, className: "modal-img", onError: e => { e.target.style.display = "none"; } })
+          ? h("div", { className: "modal-img-wrap", onClick: () => setImgExpanded(true), title: "Toca para ver completa" },
+              h("img", { src: p.image_url, alt: p.name, className: "modal-img", onError: e => { e.target.style.display = "none"; } }),
+              h("div", { className: "modal-img-hint" }, "🔍 Ver imagen completa")
+            )
           : h("div", { className: "modal-img-placeholder" }, "🌿"),
         h("div", { className: "modal-body" },
           h("div", { className: "modal-header" },
@@ -274,6 +289,69 @@
                 },
                 h(WhatsappIcon, { size: 18 }), " Pedir por WhatsApp"
               )
+          )
+        )
+      )
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // FEATURED CAROUSEL
+  // ─────────────────────────────────────────────────────────────────
+  function FeaturedCarousel({ featured, setModal, whatsapp }) {
+    const trackRef = useRef(null);
+    const [canPrev, setCanPrev] = useState(false);
+    const [canNext, setCanNext] = useState(true);
+
+    const CARD_W = 272; // card width + gap approx
+
+    const updateArrows = () => {
+      const el = trackRef.current;
+      if (!el) return;
+      setCanPrev(el.scrollLeft > 4);
+      setCanNext(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+    };
+
+    const scroll = dir => {
+      const el = trackRef.current;
+      if (!el) return;
+      el.scrollBy({ left: dir * CARD_W * 2, behavior: "smooth" });
+    };
+
+    useEffect(() => {
+      const el = trackRef.current;
+      if (!el) return;
+      updateArrows();
+      el.addEventListener("scroll", updateArrows, { passive: true });
+      window.addEventListener("resize", updateArrows);
+      return () => { el.removeEventListener("scroll", updateArrows); window.removeEventListener("resize", updateArrows); };
+    }, [featured]);
+
+    return h("div", { className: "featured-strip" },
+      h("div", { className: "featured-strip-inner" },
+        h("div", { className: "section-header" },
+          h("div", null,
+            h("div", { className: "section-label" }, "Selección especial"),
+            h("div", { className: "section-title" }, "Favoritos de Daphne")
+          ),
+          h("div", { className: "carousel-arrows" },
+            h("button", {
+              className: `carousel-arrow${canPrev ? "" : " disabled"}`,
+              onClick: () => scroll(-1),
+              "aria-label": "Anterior"
+            }, "‹"),
+            h("button", {
+              className: `carousel-arrow${canNext ? "" : " disabled"}`,
+              onClick: () => scroll(1),
+              "aria-label": "Siguiente"
+            }, "›")
+          )
+        ),
+        h("div", { className: "carousel-track", ref: trackRef },
+          featured.map(p =>
+            h("div", { key: p.id, className: "carousel-item" },
+              h(ProductCard, { p, onClick: setModal, whatsapp })
+            )
           )
         )
       )
@@ -316,7 +394,7 @@
       return list;
     }, [products, cat, search, sort, showFeatured]);
 
-    const featured = products.filter(p => p.featured && !p.soldOut).slice(0, 4);
+    const featured = products.filter(p => p.featured && !p.soldOut);
 
     const heroFloats = hero?.floats || DEFAULTS.hero.floats;
 
@@ -387,50 +465,29 @@
         )
       ),
 
-      // ── FEATURED
-      featured.length > 0 && h("div", { className: "featured-strip" },
-        h("div", { className: "featured-strip-inner" },
-          h("div", { className: "section-header" },
-            h("div", null,
-              h("div", { className: "section-label" }, "Selección especial"),
-              h("div", { className: "section-title" }, "Favoritos de Daphne")
-            )
-          ),
-          h("div", { className: "products-grid" },
-            featured.map(p =>
-              h(ProductCard, { key: p.id, p, onClick: setModal, whatsapp })
-            )
-          )
-        )
-      ),
+      // ── FEATURED CAROUSEL
+      featured.length > 0 && h(FeaturedCarousel, { featured, setModal, whatsapp }),
 
       // ── ALL PRODUCTS
       h("div", { id: "productos", className: "section" },
         h("div", { className: "section-header" },
           h("div", null,
-            h("div", { className: "section-label" }, "Catálogo completo"),
-            h("div", { className: "section-title" }, "Todos los productos")
+            h("div", { className: "section-title" }, "Nuestro Catálogo")
           )
         ),
 
         // Category pills
-        categories.length > 0 && h("div", { className: "cats-grid" },
-          h("div", {
-            className: `cat-card${cat === "Todos" ? " active" : ""}`,
+        categories.length > 0 && h("div", { className: "cat-pills-row" },
+          h("button", {
+            className: `cat-pill${cat === "Todos" ? " active" : ""}`,
             onClick: () => setCat("Todos")
-          },
-            h("div", { className: "cat-card-emoji" }, "✦"),
-            h("div", { className: "cat-card-name" }, "Todos")
-          ),
+          }, "✦ Todos"),
           categories.map(c =>
-            h("div", {
+            h("button", {
               key: c.id,
-              className: `cat-card${cat === c.name ? " active" : ""}`,
+              className: `cat-pill${cat === c.name ? " active" : ""}`,
               onClick: () => setCat(c.name)
-            },
-              h("div", { className: "cat-card-emoji" }, c.emoji || "🌿"),
-              h("div", { className: "cat-card-name" }, c.name)
-            )
+            }, `${c.emoji || "🌿"} ${c.name}`)
           )
         ),
 
@@ -477,11 +534,11 @@
 
       // ── CONTACT
       h("div", { id: "contacto", className: "contact-strip" },
-        h("h2", null, "¿Lista para tu rutina?"),
+        h("h2", null, "Es un placer atenderte"),
         h("p", null, "Escríbenos y te asesoramos sobre los mejores productos para ti."),
         h("button", {
           className: "contact-btn",
-          onClick: () => window.open(buildWaUrl(whatsapp, "¡Hola! Me gustaría recibir asesoría sobre sus productos de skincare 🌸"), "_blank")
+          onClick: () => window.open(buildWaUrl(whatsapp, "¡Hola! Me interesa este producto"), "_blank")
         },
           h(WhatsappIcon, { size: 20 }), " Escríbenos por WhatsApp"
         )
